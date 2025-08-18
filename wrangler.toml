@@ -9,13 +9,16 @@ tail_consumers = []
 ADMIN_TOKEN = "changeme-dev"
 EXCHANGE = "binance"
 EXCHANGE_WS = "wss://stream.binance.com:9443/stream"
+DESIRED_SYMBOLS = "BTCUSDT,ETHUSDT" # 逗号分隔的默认订阅集合，用于无人访问也持续同步
 
 [[durable_objects.bindings]]
 name = "MARKET_FEED"
 class_name = "MarketFeedDO"
 
-env = { }
-
 [[migrations]]
  tag = "v1"
  new_classes = ["MarketFeedDO"]
+
+[triggers]
+# 每分钟触发一次 Worker 级定时任务，用于在无人访问时也唤醒并创建 DO 实例
+crons = ["* * * * *"]

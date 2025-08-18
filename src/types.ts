@@ -1,3 +1,4 @@
+/// <reference types="@cloudflare/workers-types" />
 export type MilliTs = number; // UTC 毫秒时间戳
 
 export interface TickerSnapshot {
@@ -22,6 +23,7 @@ export interface Env {
   ADMIN_TOKEN?: string;
   EXCHANGE?: string; // 默认 "binance"
   EXCHANGE_WS?: string; // Binance 组合流的 wss 基地址
+  DESIRED_SYMBOLS?: string; // 逗号分隔的默认订阅集合，如 "BTCUSDT,ETHUSDT"
 }
 
 export interface AdminSymbolsResponse {

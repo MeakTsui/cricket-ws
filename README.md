@@ -39,6 +39,7 @@ npm run dev
 - `EXCHANGE = binance`
 - `EXCHANGE_WS = wss://stream.binance.com:9443/stream`
 - `ADMIN_TOKEN = changeme-dev`
+- 可选：`DESIRED_SYMBOLS`（逗号分隔的默认订阅集合，用于无人访问也持续同步）
 
 若首次启动，请在另一个终端添加所需币对：
 
@@ -63,6 +64,7 @@ npm run deploy
 确保在 Dashboard 或 `wrangler.toml` 中设置环境变量：
 - `ADMIN_TOKEN`（强制鉴权用）
 - 可选：`EXCHANGE`、`EXCHANGE_WS`
+- 可选：`DESIRED_SYMBOLS`（逗号分隔的默认订阅集合，用于无人访问也持续同步）
 
 ## API 文档
 
@@ -126,6 +128,25 @@ ws.onopen = () => ws.send(JSON.stringify({ op: 'sub', symbols: ['BTCUSDT'], fiel
 - Cloudflare 出站 WebSocket 到 Binance：默认允许。
 - 组合流 URL：`wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker`。
 - 如未来 symbol 数量增加导致 URL 过长，可按 symbol hash 分片到多个 DO，并通过 Router Worker 聚合。本项目先采用单实例 `idFromName('global')`。
+
+## 无人访问也持续同步（Headless）
+
+- DO 构造函数将首次闹钟提前至 5 秒，加快冷启动；`alarm()` 中会调用 `ensureUpstream()` 维持上游连接与订阅。
+- 如配置了 `DESIRED_SYMBOLS`（例如 `BTCUSDT,ETHUSDT`），在没有任何前端/管理请求时，也会自动订阅并持续采样 5 秒历史到内存与 `state.storage`。
+- 当订阅集合为空（既无客户端订阅也未配置 `DESIRED_SYMBOLS`）时，不会建立上游连接，避免无效占用。
+
+验证方法（无任何前端请求）：
+1. 在 `wrangler.toml` 或 Dashboard 设置：`DESIRED_SYMBOLS = "BTCUSDT,ETHUSDT"`。
+2. 安装依赖并启动：
+   ```bash
+   npm i
+   npm run dev
+   ```
+   观察 Wrangler/Worker 日志：应看到“上游已连接”。
+3. 可用 REST 拉取历史验证（这一步只是验证，不是维持同步所必需）：
+   ```bash
+   curl 'http://127.0.0.1:8787/api/tickers/history?symbol=BTCUSDT&limit=10'
+   ```
 
 ## 常见问题（FAQ）
 - 看不到数据？

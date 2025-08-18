@@ -1,3 +1,4 @@
+/// <reference types="@cloudflare/workers-types" />
 import {
   Env,
   LatestEntry,
@@ -82,6 +83,17 @@ class BinanceAdapter implements UpstreamAdapter {
     const wanted = new Set(Array.from(this.wanted).filter(Boolean));
     // 计算需要订阅的“超集”：desiredSymbols ∪ 各房间的客户端订阅
     const superset = this.doRef.computeNeededSymbols(wanted);
+    // 若目标集合为空，则关闭现有连接并返回，避免无效建连
+    if (superset.size === 0) {
+      if (this.ws) {
+        try { this.ws.close(1000, "no-streams"); } catch {}
+      }
+      this.ws = null;
+      this.connecting = false;
+      this.lastStreams = "";
+      return;
+    }
+
     const streams = Array.from(superset)
       .filter((s) => s)
       .map((s) => s.toLowerCase() + "@ticker")
@@ -191,8 +203,8 @@ export class MarketFeedDO implements DurableObject {
     this.state = state;
     this.env = env;
 
-    // 定时闹钟：做 GC 与心跳等维护
-    this.state.storage.setAlarm(Date.now() + 30_000);
+    // 定时闹钟：做 GC 与心跳等维护（首次 5s 加快冷启动）
+    this.state.storage.setAlarm(Date.now() + 5_000);
   }
 
   private get adminToken() {
@@ -212,8 +224,11 @@ export class MarketFeedDO implements DurableObject {
       try {
         const list: string[] = JSON.parse(raw);
         list.forEach((s) => this.desiredSymbols.add(normalizeSymbol(s)));
+        return;
       } catch {}
     }
+    // 若没有持久化记录，则尝试从环境变量引导默认订阅
+    await this.bootstrapDesiredFromEnv();
   }
 
   computeNeededSymbols(extra: Set<string> = new Set()): Set<string> {
@@ -226,12 +241,14 @@ export class MarketFeedDO implements DurableObject {
     return sup;
   }
 
-  async ensureUpstream(): Promise<void> {
+  async ensureUpstream(context: string = "unknown"): Promise<void> {
     if (!this.adapter) {
       this.adapter = new BinanceAdapter(this, this.env);
     }
     await this.loadDesiredSymbols();
-    await this.adapter.ensureSuperset(this.computeNeededSymbols());
+    const need = this.computeNeededSymbols();
+    this.log(`[${context}] ensureUpstream: 需要订阅的符号数=${need.size}${need.size > 0 ? ` 示例=[${Array.from(need).slice(0, 5).join(',')}${need.size > 5 ? ',...' : ''}]` : ''}`);
+    await this.adapter.ensureSuperset(need);
   }
 
   onUpstreamReady() {
@@ -298,6 +315,8 @@ export class MarketFeedDO implements DurableObject {
     await this.state.storage.put(`history:${symbol}`, arr);
     // 通知订阅者
     this.broadcast(symbol, { type: "bar5s", symbol, ts: point.ts, price: point.price });
+    // 采样日志（开发期可观测，每 5s/符号一次）
+    this.log(`bar5s 采样: ${symbol} ts=${point.ts} price=${point.price} (len=${arr.length})`);
   }
 
   private async loadHistory(symbol: string): Promise<Bar5s[]> {
@@ -352,9 +371,18 @@ export class MarketFeedDO implements DurableObject {
     const url = new URL(req.url);
     const path = url.pathname;
 
+    // 内部保活路由：由 Worker 层 cron 调用，确保上游连接与闹钟链路
+    if (path === "/internal/warm" && (req.method === "POST" || req.method === "GET")) {
+      const host = url.host || "";
+      const source = host === "internal.cron" ? "scheduled" : "manual-warm";
+      this.log(`收到内部保活调用 /internal/warm 来源=${source}`);
+      await this.ensureUpstream(source);
+      return json({ ok: true });
+    }
+
     // /ws：升级为 WebSocket
     if (path === "/ws") {
-      await this.ensureUpstream();
+      await this.ensureUpstream("ws");
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
       this.state.acceptWebSocket(server);
@@ -405,7 +433,7 @@ export class MarketFeedDO implements DurableObject {
       const symbols: string[] = Array.isArray(body?.symbols) ? (body.symbols as string[]) : [];
       symbols.forEach((s) => this.desiredSymbols.add(normalizeSymbol(s)));
       await this.persistDesiredSymbols();
-      await this.ensureUpstream();
+      await this.ensureUpstream("admin-add");
       return json({ ok: true });
     }
 
@@ -416,7 +444,7 @@ export class MarketFeedDO implements DurableObject {
       const symbols: string[] = Array.isArray(body?.symbols) ? (body.symbols as string[]) : [];
       symbols.forEach((s) => this.desiredSymbols.delete(normalizeSymbol(s)));
       await this.persistDesiredSymbols();
-      await this.ensureUpstream();
+      await this.ensureUpstream("admin-remove");
       return json({ ok: true });
     }
 
@@ -493,6 +521,9 @@ export class MarketFeedDO implements DurableObject {
   }
 
   async alarm() {
+    // 维护任务：先确保上游连接与订阅集合（实现 headless 保活）
+    await this.ensureUpstream("alarm");
+
     // 维护任务：GC 与 30s 心跳
     await this.runGc();
     // 每 30s 给客户端发一条 info（示例）
@@ -501,6 +532,8 @@ export class MarketFeedDO implements DurableObject {
         try { ws.send(JSON.stringify({ type: "info", msg: "ping" } satisfies ServerMsg)); } catch {}
       }
     }
+    // 打印状态摘要，便于本地观察
+    this.log(`[alarm] 状态: latest=${this.latest.size} symbols, rooms=${this.rooms.size}, desired=${this.desiredSymbols.size}`);
     // 重新设置闹钟
     this.state.storage.setAlarm(Date.now() + 30_000);
   }
@@ -514,5 +547,18 @@ export class MarketFeedDO implements DurableObject {
 
   private async persistDesiredSymbols() {
     await this.state.storage.put("desiredSymbols", JSON.stringify(Array.from(this.desiredSymbols)));
+  }
+
+  private async bootstrapDesiredFromEnv() {
+    const raw = (this.env.DESIRED_SYMBOLS || "").trim();
+    if (!raw) return;
+    const arr = raw
+      .split(",")
+      .map((s) => normalizeSymbol(s))
+      .filter((s) => !!s);
+    if (arr.length === 0) return;
+    arr.forEach((s) => this.desiredSymbols.add(s));
+    await this.persistDesiredSymbols();
+    this.log(`已从环境变量引导默认订阅：${arr.join(",")}`);
   }
 }
