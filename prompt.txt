@@ -1,0 +1,131 @@
+请严格按以下需求，用 TypeScript 基于 Cloudflare Workers + Durable Objects 实现一个“加密交易所实时 Ticker 同步 + 历史5秒采样 + 动态币对热更新 + 前后端接口与 WebSocket 推送”的最小可运行项目。
+背景与目标
+* 我需要在 Cloudflare Workers 落地一个后端，负责：
+    * 自动同步指定币对的详细 ticker 数据。
+    * 保存过去 1 小时、间隔 5 秒的价格采样（ring buffer）。
+    * 提供首屏 REST 聚合查询（最新价/涨跌幅 + 历史 5s 数据）。
+    * 提供 WebSocket 实时推送，前端可动态订阅/退订。
+    * 币对列表支持“动态热更新”，不中断服务。
+* 首选交易所：Binance；保留适配器接口以便未来扩展 OKX/Bybit。
+* 性能优先、成本低、架构简洁、可水平扩展。
+技术栈与部署
+* Cloudflare Workers + Durable Objects（DO）。
+* TypeScript，使用 Wrangler。
+* 不依赖外部数据库；数据放在 DO 内存 + state.storage。
+* 前端托管在 Cloudflare Pages（可选，提供最小示例）。
+必须实现的能力
+1. 采集与采样
+* 在单个 Durable Object MarketFeedDO 内与交易所建立上游 WebSocket。
+* 解析 Binance Ticker（组合流 @ticker），为每个 symbol：
+    * 维护最新快照：price, change_percent_24h, ts。
+    * 做 5 秒采样：bucket = floor(ts/5000)*5000，同一 bucket 取最后一条价格。
+    * 当进入下一个 bucket 时固化上一个 bucket 值写入 ring buffer（最多 720 条 ≈ 1 小时），超出弹出最旧。
+* 断线重连：指数退避；恢复后根据当前需要的 symbol 集合重建订阅。
+1. 动态币对热更新（无缝）
+* DO 内维护并持久化 desiredSymbols（Set）。
+* 计算上游需要订阅的集合：need = desiredSymbols ∪ 所有客户端实际订阅集合。
+* Binance 组合流不支持连接内增删频道，需“去抖重连”：
+    * 接口：ensureSuperset(symbols)，在 500–1000ms 去抖窗口内合并多次变更。
+    * 重连流程：新 URL 建连 → 收到第一条消息后切换主连接 → 旧连接延时 1–2s 关闭，尽量避免空窗。
+* 对于无客户端订阅且不在 desiredSymbols 的 symbol，设置 GC TTL（默认 30 分钟）后清理其内存与存储。
+1. REST API
+* GET /api/tickers/latest?symbols=BTCUSDT,ETHUSDT
+    * 返回每个 symbol 的最新快照：symbol, price, change_percent_24h, ts
+* GET /api/tickers/history?symbol=BTCUSDT&limit=720
+    * 返回近 1 小时按 5s 的序列：按时间升序 [{ts, price}]
+* 管理接口（需鉴权）
+    * GET /api/symbols → {symbols: [...]}（当前 desiredSymbols）
+    * POST /api/symbols/add Body: {"symbols":["BTCUSDT","ETHUSDT"]}
+    * POST /api/symbols/remove Body: {"symbols":["ETHUSDT"]}
+    * 鉴权方式：Authorization: Bearer ${ADMIN_TOKEN}（从环境变量读取）
+1. WebSocket /ws
+* 客户端消息：
+    * 订阅：{ "op": "sub", "symbols": ["BTCUSDT"], "fields": ["price","5s"] }
+    * 退订：{ "op": "unsub", "symbols": ["BTCUSDT"] }
+    * 心跳可选：{ "op": "ping" } 返回 pong
+* 服务端推送：
+    * 最新价（1s 节流）：{ "type":"ticker", "symbol":"BTCUSDT", "price":"...", "change_percent_24h":"...", "ts": 1723706869000 }
+    * 5s 点（桶闭合时）：{ "type":"bar5s", "symbol":"BTCUSDT", "ts": 1723706870000, "price":"..." }
+* 连接与房间
+    * DO 维护 rooms: Map<symbol, Set<WebSocket>>。
+    * 新客户端按订阅加入房间，断开时清理。
+    * 保持 30s ping/pong；空闲断开。
+1. 存储与一致性
+* DO 内存：
+    * latest: Map<string, { price: string; change24h: string; ts: number }>
+    * buckets: Map<string, { currentBucketTs: number; lastPrice: string }>
+    * history: Map<string, Array<{ ts: number; price: string }>>（ring buffer）
+    * desiredSymbols: Set<string>（持久化副本）
+    * clientSubs: Map<WebSocket, Set<string>>、rooms、lastTickerPush 节流记录
+* DO state.storage：
+    * history:{symbol} → 最近 720 条
+    * desiredSymbols → Set 序列化
+* 冷启动：
+    * 并行恢复 desiredSymbols 和各 symbol 的历史（按需 lazy load）。
+* 时间戳：毫秒 UTC。
+1. 安全与配额
+* 管理接口强制鉴权（Bearer Token，变量名 ADMIN_TOKEN）。
+* 校验 symbol 合法性（字母数字 + USDT 等，或直接允许透传由交易所决定）。
+* 频控：ticker 推送 1s 节流；5s 点按桶闭合。
+* 错误与日志：DO 内打印关键事件（重连、订阅变更、异常）。
+代码与文件交付清单
+* wrangler.toml
+    * 绑定 Durable Object：
+        * name: MARKET_FEED，class: MarketFeedDO
+    * [[migrations]] 定义 DO 类
+    * vars：
+        * ADMIN_TOKEN（示例值）
+        * EXCHANGE（"binance"）
+        * EXCHANGE_WS（默认 wss://stream.binance.com:9443/stream，组合流用 ?streams=btcusdt@ticker/ethusdt@ticker）
+* src/index.ts
+    * Worker 入口，路由：
+        * GET /api/tickers/latest
+        * GET /api/tickers/history
+        * 管理接口：/api/symbols、/api/symbols/add、/api/symbols/remove（鉴权）
+        * WebSocket /ws
+    * 所有请求委托给 MARKET_FEED 的单实例：idFromName("global")
+* src/MarketFeedDO.ts
+    * Durable Object 实现：
+        * 上游适配器（至少 BinanceAdapter；接口预留 OKXAdapter）
+        * 采样、ring buffer、storage 恢复/落盘
+        * WS rooms 管理与推送节流
+        * 管理接口处理与去抖重连
+* src/types.ts（可选）
+    * 公用类型：消息结构、快照类型、history 点类型等
+* README.md
+    * 本地开发与部署步骤
+    * 接口文档（REST 与 WS）
+    * 环境变量说明
+    * 限制与注意事项
+* 前端示例（可选）
+    * examples/frontend.html：演示
+        * 首屏拉取 /api/tickers/latest 和 /api/tickers/history
+        * 建立 /ws 并订阅，实时渲染（可仅打印到控制台）
+关键实现细节要求
+* 5 秒采样严格以“最后价”为准；允许未来替换为 VWAP/中位数。
+* 历史点按时间升序返回；最多 limit 条，默认 720。
+* DO 需有 ensureUpstream() 幂等方法，首次请求或 WS 连接时保证上游已连接。
+* BinanceAdapter：
+    * 组合 URL 生成：streams=btcusdt@ticker/ethusdt@ticker/...（symbol 小写）
+    * ensureSuperset(symbols: Set<string>) 实现去抖 + 优雅重连
+    * 断线重连采用指数退避，恢复后按最新集合建连
+* 管理接口变更后，立即更新 desiredSymbols 持久化，并驱动 ensureSuperset()。
+* GC：当 symbol 无客户端订阅且不在 desiredSymbols 时，设置回收截止时间；到期清理其 latest/buckets/history（含 storage）。
+* 返回 JSON 响应统一 application/json; charset=utf-8，错误返回 {error, code}。
+* 编码规范：ESLint/Prettier（可选）；类型声明完整。
+验收标准（务必满足）
+* 本地 wrangler dev 可跑通：
+    * 管理接口添加/移除 symbol 后，上游订阅随之生效（Binance 用去抖重连）。
+    * REST 接口返回正确的最新价与近 1 小时 5s 序列。
+    * WebSocket 订阅后能持续收到 ticker（1s 节流）和 bar5s（5s 闭合）消息。
+    * DO 冷启动后仍能读到历史数据。
+* 代码清晰、模块化、注释关键逻辑（采样、去抖重连、房间广播、存储结构）。
+* README 提供完整运行与部署指引。
+额外说明
+* 时间戳一律毫秒 UTC，由前端自行格式化。
+* 如组合流 URL 过长或 symbol 规模变大，README 中说明如何按 symbol hash 分片到多个 DO，并增加 Router Worker 聚合（本次可先单实例）。
+* 可提供简单单元测试或内置日志来验证采样与 ring buffer 行为。
+请直接输出完整项目代码（包含上述文件），保证可用 Wrangler 一键运行与部署，并在 README 里列出请求示例、WS 消息示例与常见问题。若遇到 Cloudflare 兼容性要求（出站 WebSocket、Hibernatable DO 等），请在 README 中注明需要的 
+compatibility_date 和配置项。最后，请确保默认交易所为 Binance，且符号大小写处理与 URL 拼接正确。
+
+—— 完 ——

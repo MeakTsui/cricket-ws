@@ -1,0 +1,21 @@
+name = "crx-ticker"
+main = "src/index.ts"
+compatibility_date = "2024-11-21"
+compatibility_flags = ["durable_object_alarms"]
+
+tail_consumers = []
+
+[vars]
+ADMIN_TOKEN = "changeme-dev"
+EXCHANGE = "binance"
+EXCHANGE_WS = "wss://stream.binance.com:9443/stream"
+
+[[durable_objects.bindings]]
+name = "MARKET_FEED"
+class_name = "MarketFeedDO"
+
+env = { }
+
+[[migrations]]
+ tag = "v1"
+ new_classes = ["MarketFeedDO"]

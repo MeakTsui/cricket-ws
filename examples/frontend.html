@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Ticker Demo</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+      pre { background: #f5f5f5; padding: 12px; border-radius: 8px; }
+      .row { display: flex; gap: 16px; align-items: center; }
+      input { padding: 6px 8px; }
+      button { padding: 6px 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Crypto Ticker Demo</h1>
+    <div class="row">
+      <input id="symbols" value="BTCUSDT,ETHUSDT" size="40" />
+      <button id="load">Load Latest+History</button>
+      <button id="connect">Connect WS</button>
+    </div>
+    <h3>Latest</h3>
+    <pre id="latest"></pre>
+    <h3>History (BTCUSDT)</h3>
+    <pre id="history"></pre>
+    <h3>WS Messages</h3>
+    <pre id="ws"></pre>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const base = location.origin;
+
+      $('load').onclick = async () => {
+        const symbols = $('symbols').value;
+        const latest = await fetch(`${base}/api/tickers/latest?symbols=${encodeURIComponent(symbols)}`).then(r => r.json());
+        $('latest').textContent = JSON.stringify(latest, null, 2);
+        const first = symbols.split(',')[0].trim();
+        if (first) {
+          const history = await fetch(`${base}/api/tickers/history?symbol=${encodeURIComponent(first)}&limit=60`).then(r => r.json());
+          $('history').textContent = JSON.stringify(history, null, 2);
+        }
+      };
+
+      $('connect').onclick = async () => {
+        const ws = new WebSocket(base.replace('http', 'ws') + '/ws');
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ op: 'sub', symbols: $('symbols').value.split(',').map(s => s.trim()), fields: ['price','5s'] }));
+        };
+        ws.onmessage = (e) => {
+          const prev = $('ws').textContent;
+          $('ws').textContent = (prev + '\n' + e.data).trim();
+        };
+      };
+    </script>
+  </body>
+</html>
