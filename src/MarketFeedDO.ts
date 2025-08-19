@@ -193,6 +193,8 @@ export class MarketFeedDO implements DurableObject {
   // WS 房间与订阅关系
   private rooms = new Map<string, Set<WebSocket>>();
   private clientSubs = new Map<WebSocket, Set<string>>();
+  // 每个客户端的字段偏好：price、5s
+  private clientFields = new Map<WebSocket, Set<"price" | "5s">>();
   private lastTickerPush = new Map<string, number>();
 
   // 上游适配器
@@ -335,6 +337,13 @@ export class MarketFeedDO implements DurableObject {
     if (!room || room.size === 0) return;
     const data = JSON.stringify(msg);
     for (const ws of room) {
+      // 按字段偏好过滤：ticker 需要 price；bar5s 需要 5s
+      const fields = this.clientFields.get(ws);
+      if (msg.type === "ticker") {
+        if (fields && !fields.has("price")) continue;
+      } else if (msg.type === "bar5s") {
+        if (fields && !fields.has("5s")) continue;
+      }
       try { ws.send(data); } catch {}
     }
   }
@@ -386,8 +395,9 @@ export class MarketFeedDO implements DurableObject {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
       this.state.acceptWebSocket(server);
-      // 初始订阅为空
+      // 初始订阅为空、字段默认同时接收 price 与 5s
       this.clientSubs.set(server, new Set());
+      this.clientFields.set(server, new Set(["price", "5s"]));
       return new Response(null, { status: 101, webSocket: client } as any);
     }
 
@@ -476,6 +486,14 @@ export class MarketFeedDO implements DurableObject {
         set = new Set();
         this.clientSubs.set(ws, set);
       }
+      // 更新字段偏好（如果提供）
+      if (Array.isArray(data.fields) && data.fields.length > 0) {
+        const f = new Set<"price" | "5s">();
+        for (const x of data.fields) {
+          if (x === "price" || x === "5s") f.add(x);
+        }
+        if (f.size > 0) this.clientFields.set(ws, f);
+      }
       // 加入房间
       for (const s of want) {
         set.add(s);
@@ -514,6 +532,7 @@ export class MarketFeedDO implements DurableObject {
       if (room && room.size === 0) this.rooms.delete(s);
     }
     this.clientSubs.delete(ws);
+    this.clientFields.delete(ws);
   }
 
   async webSocketError(ws: WebSocket, error: any) {
