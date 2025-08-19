@@ -11,6 +11,7 @@ export interface TickerSnapshot {
 export interface Bar5s {
   ts: MilliTs;
   price: string;
+  change_percent_24h: string;
 }
 
 export interface HistorySeries {
@@ -38,7 +39,7 @@ export type ClientMsg =
 export type ServerMsg =
   | { type: "pong" }
   | { type: "ticker"; symbol: string; price: string; change_percent_24h: string; ts: MilliTs }
-  | { type: "bar5s"; symbol: string; ts: MilliTs; price: string }
+  | { type: "bar5s"; symbol: string; ts: MilliTs; price: string; change_percent_24h: string }
   | { type: "info"; msg: string }
   | { type: "error"; code: string; error: string };
 
@@ -52,6 +53,7 @@ export interface LatestEntry {
 export interface BucketEntry {
   currentBucketTs: MilliTs; // 当前桶起始：floor(ts/5000)*5000
   lastPrice: string; // 当前桶内最新看到的价格
+  lastChange24h: string; // 当前桶内最新看到的 24h 涨跌幅
 }
 
 export interface UpstreamAdapter {

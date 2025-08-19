@@ -274,33 +274,24 @@ export class MarketFeedDO implements DurableObject {
     const bucketTs = toBucketTs(ts);
     const b = this.buckets.get(symbol);
     if (!b) {
-      this.buckets.set(symbol, { currentBucketTs: bucketTs, lastPrice: price });
+      this.buckets.set(symbol, { currentBucketTs: bucketTs, lastPrice: price, lastChange24h: change24h });
     } else {
       if (bucketTs === b.currentBucketTs) {
         b.lastPrice = price; // 桶内保持“最后价”
+        b.lastChange24h = change24h; // 同步 24h 变动
       } else if (bucketTs > b.currentBucketTs) {
         // 桶前移：将上一个桶最终价固化到历史
-        await this.pushHistoryPoint(symbol, { ts: b.currentBucketTs + BUCKET_MS, price: b.lastPrice });
+        await this.pushHistoryPoint(symbol, { ts: b.currentBucketTs + BUCKET_MS, price: b.lastPrice, change_percent_24h: b.lastChange24h });
         // 开启新桶
         b.currentBucketTs = bucketTs;
         b.lastPrice = price;
+        b.lastChange24h = change24h;
       } else {
         // 乱序，忽略
       }
     }
 
-    // 逐 symbol 对 ticker 推送进行 1s 节流
-    const last = this.lastTickerPush.get(symbol) || 0;
-    if (ts - last >= TICKER_PUSH_THROTTLE_MS) {
-      this.lastTickerPush.set(symbol, ts);
-      this.broadcast(symbol, {
-        type: "ticker",
-        symbol,
-        price,
-        change_percent_24h: change24h,
-        ts,
-      });
-    }
+    // WS 不再推送 ticker，只做 latest 内存保存与 REST 输出
 
     // 若该 symbol 无客户端订阅且不在 desiredSymbols，安排 GC
     this.maybeScheduleGc(symbol);
@@ -316,9 +307,9 @@ export class MarketFeedDO implements DurableObject {
     this.history.set(symbol, arr);
     await this.state.storage.put(`history:${symbol}`, arr);
     // 通知订阅者
-    this.broadcast(symbol, { type: "bar5s", symbol, ts: point.ts, price: point.price });
+    this.broadcast(symbol, { type: "bar5s", symbol, ts: point.ts, price: point.price, change_percent_24h: point.change_percent_24h });
     // 采样日志（开发期可观测，每 5s/符号一次）
-    this.log(`bar5s 采样: ${symbol} ts=${point.ts} price=${point.price} (len=${arr.length})`);
+    this.log(`bar5s 采样: ${symbol} ts=${point.ts} price=${point.price} change24h=${point.change_percent_24h} (len=${arr.length})`);
   }
 
   private async loadHistory(symbol: string): Promise<Bar5s[]> {
