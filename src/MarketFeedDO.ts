@@ -473,8 +473,9 @@ export class MarketFeedDO implements DurableObject {
 
     if (!data) return;
 
+    // 客户端 ping：按需回复 pong（不做广播，节省成本）
     if (data.op === "ping") {
-      ws.send(JSON.stringify({ type: "pong" } satisfies ServerMsg));
+      try { ws.send(JSON.stringify({ type: "pong" } satisfies ServerMsg)); } catch {}
       return;
     }
 
@@ -543,18 +544,18 @@ export class MarketFeedDO implements DurableObject {
     // 维护任务：先确保上游连接与订阅集合（实现 headless 保活）
     await this.ensureUpstream("alarm");
 
-    // 维护任务：GC 与 30s 心跳
+    // 维护任务：GC（移除服务端主动 ping，改为客户端 ping -> pong，减少成本）
     await this.runGc();
-    // 每 30s 给客户端发一条 info（示例）
-    for (const room of this.rooms.values()) {
-      for (const ws of room) {
-        try { ws.send(JSON.stringify({ type: "info", msg: "ping" } satisfies ServerMsg)); } catch {}
-      }
-    }
-    // 打印状态摘要，便于本地观察
-    this.log(`[alarm] 状态: latest=${this.latest.size} symbols, rooms=${this.rooms.size}, desired=${this.desiredSymbols.size}`);
+
+    // 自适应闹钟间隔：有活动则较频繁，无活动则拉长
+    const hasActiveRooms = this.rooms.size > 0;
+    const hasDesired = this.desiredSymbols.size > 0;
+    const nextIntervalMs = hasActiveRooms || hasDesired ? 30_000 : 10 * 60_000; // 30s or 10min
+
+    // 打印状态摘要（可保留，方便观测）
+    this.log(`[alarm] 状态: latest=${this.latest.size} symbols, rooms=${this.rooms.size}, desired=${this.desiredSymbols.size}, next=${nextIntervalMs}ms`);
     // 重新设置闹钟
-    this.state.storage.setAlarm(Date.now() + 30_000);
+    this.state.storage.setAlarm(Date.now() + nextIntervalMs);
   }
 
   private async checkAdminAuth(req: Request): Promise<boolean> {
