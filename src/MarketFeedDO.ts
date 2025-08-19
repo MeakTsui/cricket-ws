@@ -9,6 +9,7 @@ import {
   ClientMsg,
   ServerMsg,
   UpstreamAdapter,
+  HistorySeries,
 } from "./types";
 
 // 工具常量与函数
@@ -410,10 +411,25 @@ export class MarketFeedDO implements DurableObject {
 
     if (path === "/api/tickers/history" && req.method === "GET") {
       await this.ensureUpstream();
-      const symbol = normalizeSymbol(url.searchParams.get("symbol") || "");
-      if (!symbol) return err("BadRequest", "symbol required", 400);
       const limit = Math.min(Number(url.searchParams.get("limit") || RING_LIMIT), RING_LIMIT);
-      const series = await this.loadHistory(symbol);
+      const symbolsParam = (url.searchParams.get("symbols") || "").trim();
+      const singleSymbol = normalizeSymbol(url.searchParams.get("symbol") || "");
+      if (symbolsParam) {
+        const list = symbolsParam
+          .split(",")
+          .map((s) => normalizeSymbol(s))
+          .filter((s) => !!s);
+        const result: HistorySeries[] = [];
+        for (const s of list) {
+          const arr = await this.loadHistory(s);
+          const points = arr.slice(Math.max(0, arr.length - limit));
+          result.push({ symbol: s, points });
+        }
+        return json(result);
+      }
+      // 兼容单符号查询
+      if (!singleSymbol) return err("BadRequest", "symbol or symbols required", 400);
+      const series = await this.loadHistory(singleSymbol);
       const points = series.slice(Math.max(0, series.length - limit));
       return json(points);
     }
