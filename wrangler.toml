@@ -1,6 +1,6 @@
 name = "crx-ticker"
 main = "src/index.ts"
-compatibility_date = "2024-11-21"
+compatibility_date = "2025-08-18"
 compatibility_flags = ["durable_object_alarms"]
 
 tail_consumers = []
@@ -17,7 +17,7 @@ class_name = "MarketFeedDO"
 
 [[migrations]]
  tag = "v1"
- new_classes = ["MarketFeedDO"]
+ new_sqlite_classes = ["MarketFeedDO"]
 
 [triggers]
 # 每分钟触发一次 Worker 级定时任务，用于在无人访问时也唤醒并创建 DO 实例
